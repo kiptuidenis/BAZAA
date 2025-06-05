@@ -24,6 +24,7 @@ INSTALLED_APPS = [
     
     # Third party apps
     'rest_framework',
+    'rest_framework_simplejwt',
     'corsheaders',
     'django_celery_beat',
     'django_celery_results',
@@ -33,6 +34,9 @@ INSTALLED_APPS = [
     'budget_management',
     'mpesa_integration',
 ]
+
+# Custom user model
+AUTH_USER_MODEL = 'authentication.CustomUser'
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
