@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: bazaadb
+      MYSQL_USER: bazaau
+      MYSQL_PASSWORD: bazaapass
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - bazaanet
+
+  rabbitmq:
+    image: rabbitmq:3.9-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - bazaanet
+
+  auth-service:
+    build:
+      context: ./auth-service
+    command: |
+      sh -c "python manage.py migrate && \
+             python manage.py runserver 0.0.0.0:8001"
+    volumes:
+      - ./auth-service:/app
+    working_dir: /app
+    ports:
+      - "8001:8001"
+    depends_on:
+      - db
+    networks:
+      - bazaanet
+
+  budget-service:
+    build:
+      context: ./budget-service
+    command: |
+      sh -c "python manage.py migrate && \
+             python manage.py runserver 0.0.0.0:8002"
+    volumes:
+      - ./budget-service:/app
+    working_dir: /app
+    ports:
+      - "8002:8002"
+    depends_on:
+      - db
+    networks:
+      - bazaanet
+
+  mpesa-service:
+    build:
+      context: ./mpesa-service
+    command: |
+      sh -c "python manage.py migrate && \
+             python manage.py runserver 0.0.0.0:8003"
+    volumes:
+      - ./mpesa-service:/app
+    working_dir: /app
+    ports:
+      - "8003:8003"
+    depends_on:
+      - db
+    networks:
+      - bazaanet
+
+  notification-service:
+    build:
+      context: ./notification-service
+    command: |
+      sh -c "python manage.py migrate && \
+             python manage.py runserver 0.0.0.0:8004"
+    volumes:
+      - ./notification-service:/app
+    working_dir: /app
+    ports:
+      - "8004:8004"
+    depends_on:
+      - rabbitmq
+    networks:
+      - bazaanet
+
+volumes:
+  db_data:
+
+networks:
+  bazaanet: {}  
