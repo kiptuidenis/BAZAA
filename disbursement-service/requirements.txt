@@ -1,9 +1,9 @@
 Django==4.2.7
 djangorestframework==3.14.0
+celery==5.3.6
 requests==2.31.0
 python-dotenv==1.0.0
 mysqlclient==2.2.0
 pika==1.3.2
-
-rest_framework_simplejwt
-corsheaders
+rest_framework_simplejwt==5.3.1
+corsheaders==4.3.1 

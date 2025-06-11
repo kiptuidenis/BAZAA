@@ -1,95 +1,138 @@
-from rest_framework.views import APIView
+"""Views for handling MPESA STK Push requests and callbacks."""
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from django.core.exceptions import ObjectDoesNotExist
 from django.conf import settings
-from django.utils import timezone
-from django.contrib.auth import get_user_model
 import requests
-import uuid
+import json
 
-from .models import STKRequest, STKCallback
-from .serializers import STKRequestSerializer, STKCallbackSerializer
+from .models import STKPushRequest
+from .serializers import (
+    STKPushRequestSerializer,
+    STKCallbackSerializer,
+    STKPushResultSerializer
+)
 
-User = get_user_model()
+class MPESAServiceViewSet(viewsets.ModelViewSet):
+    queryset = STKPushRequest.objects.all()
+    serializer_class = STKPushRequestSerializer
 
+    def get_access_token(self):
+        """Get MPESA API access token"""
+        consumer_key = settings.MPESA_CONSUMER_KEY
+        consumer_secret = settings.MPESA_CONSUMER_SECRET
+        auth_url = settings.MPESA_AUTH_URL
 
-class STKPushView(APIView):
-    """Initiate MPESA STK Push"""
-
-    def post(self, request, *args, **kwargs):
-        user = request.user
-        phone = request.data.get('phone', getattr(user, 'mpesa_phone', None))
-        amount = request.data.get('amount')
-        if not phone or not amount:
-            return Response({'detail': 'phone and amount required'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Create STKRequest
-        checkout_request_id = str(uuid.uuid4())
-        stk_req = STKRequest.objects.create(
-            user=user,
-            phone=phone,
-            amount=amount,
-            checkout_request_id=checkout_request_id
+        response = requests.get(
+            auth_url,
+            auth=(consumer_key, consumer_secret)
         )
+        return response.json()['access_token']
 
-        # Build payload (simulated or real)
-        payload = {
-            'BusinessShortCode': settings.MPESA_SHORTCODE,
-            'Password': settings.MPESA_PASSWORD,
-            'Timestamp': timezone.now().strftime('%Y%m%d%H%M%S'),
-            'TransactionType': 'CustomerPayBillOnline',
-            'Amount': amount,
-            'PartyA': phone,
-            'PartyB': settings.MPESA_SHORTCODE,
-            'PhoneNumber': phone,
-            'CallBackURL': settings.MPESA_CALLBACK_URL,
-            'AccountReference': str(user.id),
-            'TransactionDesc': 'BAZAA Deposit'
-        }
+    @action(detail=False, methods=['post'])
+    def initiate_stk_push(self, request):
+        """Initiate STK Push request"""
         try:
-            resp = requests.post(settings.MPESA_STK_PUSH_URL, json=payload)
-            data = resp.json()
-            stk_req.merchant_request_id = data.get('MerchantRequestID')
-            stk_req.response_code = data.get('ResponseCode')
-            stk_req.response_description = data.get('ResponseDescription')
-            stk_req.save()
-            return Response({'checkout_request_id': checkout_request_id}, status=status.HTTP_200_OK)
+            access_token = self.get_access_token()
+            phone_number = request.data.get('phone_number')
+            amount = request.data.get('amount')
+            user_id = request.data.get('user_id')
+
+            # Format phone number (remove leading 0 and add country code)
+            if phone_number.startswith('0'):
+                phone_number = '254' + phone_number[1:]
+
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+
+            payload = {
+                "BusinessShortCode": settings.MPESA_SHORTCODE,
+                "Password": settings.MPESA_PASSWORD,
+                "Timestamp": settings.MPESA_TIMESTAMP,
+                "TransactionType": "CustomerPayBillOnline",
+                "Amount": amount,
+                "PartyA": phone_number,
+                "PartyB": settings.MPESA_SHORTCODE,
+                "PhoneNumber": phone_number,
+                "CallBackURL": settings.MPESA_CALLBACK_URL,
+                "AccountReference": f"BAZAA_{user_id}",
+                "TransactionDesc": "BAZAA Deposit"
+            }
+
+            response = requests.post(
+                settings.MPESA_STK_PUSH_URL,
+                headers=headers,
+                json=payload
+            )
+            response_data = response.json()
+
+            if response.status_code == 200:
+                stk_push = STKPushRequest.objects.create(
+                    user_id=user_id,
+                    phone_number=phone_number,
+                    amount=amount,
+                    checkout_request_id=response_data['CheckoutRequestID'],
+                    merchant_request_id=response_data['MerchantRequestID'],
+                    response_code=response_data['ResponseCode'],
+                    response_description=response_data['ResponseDescription']
+                )
+                return Response({
+                    'status': 'success',
+                    'message': 'STK Push initiated successfully',
+                    'data': self.get_serializer(stk_push).data
+                })
+            else:
+                return Response({
+                    'status': 'error',
+                    'message': 'Failed to initiate STK Push',
+                    'error': response_data
+                }, status=status.HTTP_400_BAD_REQUEST)
+
         except Exception as e:
-            stk_req.response_description = str(e)
-            stk_req.save()
-            return Response({'detail': 'MPESA request failed'}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
-class STKCallbackView(APIView):
-    """Receive MPESA STK Push callback"""
-    authentication_classes = []  # allow external callbacks
-    permission_classes = []
-
-    def post(self, request, *args, **kwargs):
-        body = request.data.get('Body', {})
-        result = body.get('stkCallback', {})
-        checkout_request_id = result.get('CheckoutRequestID')
-        if not checkout_request_id:
-            return Response(status=status.HTTP_400_BAD_REQUEST)
-
+    @action(detail=False, methods=['post'])
+    def stk_push_callback(self, request):
+        """Handle STK Push callback"""
         try:
-            stk_req = STKRequest.objects.get(checkout_request_id=checkout_request_id)
-        except STKRequest.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+            callback_data = request.data
+            checkout_request_id = callback_data['Body']['stkCallback']['CheckoutRequestID']
+            result_code = callback_data['Body']['stkCallback']['ResultCode']
+            result_description = callback_data['Body']['stkCallback']['ResultDesc']
 
-        # parse metadata items
-        items = result.get('CallbackMetadata', {}).get('Item', [])
-        amount = next((i['Value'] for i in items if i.get('Name') == 'Amount'), None)
-        mpesa_receipt = next((i['Value'] for i in items if i.get('Name') == 'MpesaReceiptNumber'), None)
-        phone = next((i['Value'] for i in items if i.get('Name') == 'PhoneNumber'), None)
+            stk_push = STKPushRequest.objects.get(checkout_request_id=checkout_request_id)
+            
+            if result_code == 0:
+                # Transaction successful
+                callback_metadata = callback_data['Body']['stkCallback']['CallbackMetadata']['Item']
+                receipt_number = next(item['Value'] for item in callback_metadata if item['Name'] == 'MpesaReceiptNumber')
+                
+                stk_push.status = 'SUCCESS'
+                stk_push.result_code = result_code
+                stk_push.result_description = result_description
+                stk_push.receipt_number = receipt_number
+                stk_push.save()
 
-        callback = STKCallback.objects.create(
-            stk_request=stk_req,
-            result_code=result.get('ResultCode'),
-            result_desc=result.get('ResultDesc'),
-            mpesa_receipt_number=mpesa_receipt or '',
-            amount=amount or 0,
-            phone=phone or '',
-            transaction_date=timezone.now()
-        )
-        return Response({'detail': 'callback received'}, status=status.HTTP_200_OK)
+                # TODO: Trigger notification service
+                # TODO: Update user's balance in budget service
+
+            else:
+                stk_push.status = 'FAILED'
+                stk_push.result_code = result_code
+                stk_push.result_description = result_description
+                stk_push.save()
+
+            return Response({'status': 'success'})
+
+        except Exception as e:
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

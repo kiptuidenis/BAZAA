@@ -1,7 +1,7 @@
 from django.urls import path
-from .views import STKPushView, STKCallbackView
+from .views import STKPushView, STKPushCallbackView
 
 urlpatterns = [
-    path('stkpush/', STKPushView.as_view(), name='stkpush'),
-    path('callback/', STKCallbackView.as_view(), name='stkpush_callback'),
+    path('stkpush/', STKPushView.as_view(), name='stk-push'),
+    path('stkpush/callback/', STKPushCallbackView.as_view(), name='stk-callback'),
 ]
